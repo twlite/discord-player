@@ -636,11 +636,22 @@ export class GuildQueuePlayerNode<Metadata = unknown> {
     return this.session ? this.session.volume * 100 : this.#volume;
   }
 
-  /** Current media position in milliseconds, or zero when Remedia has no position. */
+  /**
+   * Estimated source-media position, suitable for lyrics, seeking and a progress bar
+   * against the original Track duration. Prefer the Remedia client's reconciled clock
+   * over raw media timestamps, which can be cached or ahead of audible playback.
+   */
   public get playbackTime(): number {
-    const position = this.session?.position;
+    const session = this.session;
+    if (!session) return 0;
+    const clock = session as typeof session & { getMediaTime?: () => number | null };
+    return Math.max(0, clock.getMediaTime?.() ?? session.position.mediaMs ?? session.getPlaybackTime());
+  }
 
-    return position?.mediaMs ?? position?.playedMs ?? 0;
+  /** Constant rate of source progress per output second, or null for opaque graphs. */
+  public get playbackRate(): number | null {
+    const session = this.session as (typeof this.session & { getPlaybackRate?: () => number | null });
+    return session?.getPlaybackRate?.() ?? 1;
   }
 
   /** Total session duration in milliseconds, falling back to the current Track's duration. */
