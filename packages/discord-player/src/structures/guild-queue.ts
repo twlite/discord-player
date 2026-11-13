@@ -1499,10 +1499,10 @@ export class GuildQueue<Metadata = unknown> {
   private async autoplay(track: Track, revision: number): Promise<PlayRawResult | null> {
     const controller = new AbortController();
     this.#autoplayController = controller;
-    const signal = AbortSignal.any([controller.signal, this.signal]);
+    const signal = AbortSignal.any([controller.signal, this.signal, AbortSignal.timeout(15_000)]);
     try {
       const reference = track.sourceReference;
-      const result = await this.manager.player.plugins.execute(
+      const lookup = this.manager.player.plugins.execute(
         'track.related',
         { track },
         {
@@ -1512,6 +1512,15 @@ export class GuildQueue<Metadata = unknown> {
           blocked: this.manager.player.options.blockExtractors,
         },
       );
+      // A provider that ignores cancellation must not keep an already finished queue
+      // in the pending-autoplay state forever.
+      const result = await Promise.race([
+        lookup,
+        new Promise<null>((_, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+      ]);
       if (signal.aborted || this.#operation || this.size || revision !== this.#decisionRevision) return null;
       const candidates = (result?.tracks ?? []).filter(
         (item) => item.id !== track.id && (!track.url || item.url !== track.url),
@@ -1524,14 +1533,21 @@ export class GuildQueue<Metadata = unknown> {
       this.emit(GuildQueueEvents.EmptyQueue);
       return null;
     } catch (error) {
-      if (!signal.aborted) {
+      if (!controller.signal.aborted && !this.signal.aborted) {
         this.emit(GuildQueueEvents.Error, asError(error));
-        this.voice.ended();
-        this.emit(GuildQueueEvents.EmptyQueue);
+        if (!this.#operation && !this.size) {
+          this.voice.ended();
+          this.emit(GuildQueueEvents.EmptyQueue);
+        }
       }
       return null;
     } finally {
       if (this.#autoplayController === controller) this.#autoplayController = null;
+      // An enqueue can invalidate an in-flight related lookup after finalizeLocked
+      // has already cleared the active operation. Resume the pending queue if needed.
+      if (!this.#destroyed && !this.#operation && this.size) {
+        void this.playNext().catch((error) => this.emit(GuildQueueEvents.Error, asError(error)));
+      }
     }
   }
 
